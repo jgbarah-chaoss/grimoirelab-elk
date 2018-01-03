@@ -84,16 +84,20 @@ def find_item_json(elastic, type_, item_id):
 
 
 def clean_dashboard_for_data_sources(dash_json, data_sources):
-    """ Remove all items that are not from the data sources """
+    """ Remove all items that are not from the data sources
 
-    logger.debug("Cleaning dashboard for %s", data_sources)
+    :param    dash_json: dict with the data of the dashboard (to be converted to JSON)
+    :param data_sources: if not None, only upload item for these data_sources
+    """
+
+    logger.debug("Cleaning dashboard (data sources: %s)", data_sources)
 
     dash_json_clean = copy.deepcopy(dash_json)
 
     dash_json_clean['uiStateJSON'] = ""
     dash_json_clean['panelsJSON'] = ""
 
-    # Time to add the panels (widgets) related to the data_sources
+    # Time to add the panels related to the data_sources and indexes
     panelsJSON = json.loads(dash_json['panelsJSON'])
     clean_panelsJSON = []
     for panel in panelsJSON:
@@ -106,13 +110,39 @@ def clean_dashboard_for_data_sources(dash_json, data_sources):
     return dash_json_clean
 
 
-def import_item_json(elastic, type_, item_id, item_json, data_sources=None):
-    """ Import an item in Elasticsearch  """
+def import_item_json(elastic, type_, item_id, item_json,
+                     data_sources=None, indexes=None):
+    """ Import an item in (upload to) Elasticsearch
+
+    Iten can be a dashboard, a visualization, a search, or an index pattern.
+
+    :param      elastic: connection to Elasticsearch
+    :param         type: thpe of item: dashboard, visualization, search, or index-pattern
+    :param      item_id: identified of the item
+    :param    item_json: dict with the data of the item (to be converted to JSON)
+    :param data_sources: if not None, only upload item for these data_sources
+    :param      indexes: if not None, only upload item for these indexes
+
+    """
     elastic_ver = find_elasticsearch_version(elastic)
 
     if data_sources:
         if type_ == 'dashboard':
             item_json = clean_dashboard_for_data_sources(item_json, data_sources)
+        elif type_ == 'search':
+            if not is_search_from_data_sources(item_json, data_sources):
+                logger.debug("Search %s not for %s. Not included.", item_id, data_sources)
+                return
+        elif type_ == 'index_pattern':
+            if not is_index_pattern_from_data_sources(item_json, data_sources):
+                logger.debug("Index pattern %s not for %s. Not included.", item_id, data_sources)
+                return
+        elif type_ == 'visualization':
+            if not is_vis_from_data_sources(item_json, data_sources):
+                logger.debug("Vis %s not for %s. Not included.", item_id, data_sources)
+                return
+
+    if indexes:
         if type_ == 'search':
             if not is_search_from_data_sources(item_json, data_sources):
                 logger.debug("Search %s not for %s. Not included.", item_id, data_sources)
@@ -180,16 +210,21 @@ def get_index_pattern_json(elastic, index_pattern_id):
 
     return index_pattern_json
 
+def get_search_from_vis_json(vis):
+    """Get Search on which a Visualization is based.
+
+    :param vis: visualization (as a dictionary)
+    """
+
+    if "savedSearchId" in vis:
+        return vis["savedSearchId"]
+    else:
+        return None
 
 def get_search_from_vis(elastic, vis):
-    search_id = None
+
     vis_json = get_vis_json(elastic, vis)
-    if not vis_json:
-        search_id
-    # The index pattern could be in search or in state
-    # First search for it in saved search
-    if "savedSearchId" in vis_json:
-        search_id = vis_json["savedSearchId"]
+    search_id = get_search_from_vis_json(vis_json)
     return search_id
 
 
@@ -474,55 +509,55 @@ def list_dashboards(elastic_url, es_index=None):
         print("_id:%s title:%s" % (dash["_id"], dash["title"]))
 
 
-def read_panel_file(panel_file):
-    """Read a panel file (in JSON format) and return its contents.
+# def read_panel_file(panel_file):
+#     """Read a panel file (in JSON format) and return its contents.
+#
+#     :param panel_file: name of JSON file with the dashboard to read
+#     :returns: dictionary with dashboard read,
+#                 None if not found or wrong format
+#     """
+#
+#     if os.path.isfile(panel_file):
+#         logger.debug("Reading panel from directory: %s", panel_file)
+#         with open(panel_file, 'r') as f:
+#             kibana_str = f.read()
+#     else:
+#         try:
+#             import panels
+#             panels_mod = panels
+#             logger.debug("Reading panel from module panels")
+#             # Next is just a hack for files with "expected" prefix
+#             if panel_file.startswith('panels/json/'):
+#                 module_file = panel_file[len('panels/json/'):]
+#             else:
+#                 module_file = panel_file
+#             kibana_bytes = pkgutil.get_data('panels', 'json' + '/' + module_file)
+#             kibana_str = kibana_bytes.decode(encoding='utf8')
+#         except (ImportError, FileNotFoundError, AttributeError):
+#             logger.error("Panel not found (not in directory, no panels module): %s",
+#                          panel_file)
+#             return None
+#
+#     try:
+#         kibana_dict = json.loads(kibana_str)
+#     except ValueError:
+#         logger.error("Wrong file format (not JSON): %s", module_file)
+#         return None
+#     return kibana_dict
 
-    :param panel_file: name of JSON file with the dashboard to read
-    :returns: dictionary with dashboard read,
-                None if not found or wrong format
-    """
 
-    if os.path.isfile(panel_file):
-        logger.debug("Reading panel from directory: %s", panel_file)
-        with open(panel_file, 'r') as f:
-            kibana_str = f.read()
-    else:
-        try:
-            import panels
-            panels_mod = panels
-            logger.debug("Reading panel from module panels")
-            # Next is just a hack for files with "expected" prefix
-            if panel_file.startswith('panels/json/'):
-                module_file = panel_file[len('panels/json/'):]
-            else:
-                module_file = panel_file
-            kibana_bytes = pkgutil.get_data('panels', 'json' + '/' + module_file)
-            kibana_str = kibana_bytes.decode(encoding='utf8')
-        except (ImportError, FileNotFoundError, AttributeError):
-            logger.error("Panel not found (not in directory, no panels module): %s",
-                         panel_file)
-            return None
-
-    try:
-        kibana_dict = json.loads(kibana_str)
-    except ValueError:
-        logger.error("Wrong file format (not JSON): %s", module_file)
-        return None
-    return kibana_dict
-
-
-def get_dashboard_name(panel_file):
-    """ Return the dashboard name included in a JSON panel file """
-
-    dash_name = None
-
-    kibana = read_panel_file(panel_file)
-    if kibana and 'dashboard' in kibana:
-        dash_name = kibana['dashboard']['id']
-    elif kibana:
-        logger.error("Wrong panel format (can't find 'dashboard' field): %s",
-                     panel_file)
-    return dash_name
+# def get_dashboard_name(panel_file):
+#     """ Return the dashboard name included in a JSON panel file """
+#
+#     dash_name = None
+#
+#     kibana = read_panel_file(panel_file)
+#     if kibana and 'dashboard' in kibana:
+#         dash_name = kibana['dashboard']['id']
+#     elif kibana:
+#         logger.error("Wrong panel format (can't find 'dashboard' field): %s",
+#                      panel_file)
+#     return dash_name
 
 
 def is_search_from_data_sources(search, data_sources):
@@ -563,52 +598,266 @@ def is_index_pattern_from_data_sources(index, data_sources):
 
     return found
 
+def get_widgets_from_dashboard(dashboard):
+    """Get list of widgets composing a dashboard.
 
-def import_dashboard(elastic_url, import_file, es_index=None, data_sources=None):
-    """ Import a dashboard from a file
+    Widgets (visualizations and searches) are defined in the panelsJSON
+    field in the dashboard value.
+
+    This method produces a list of all widgets found. For each widget,
+    a pair (widget_type, widget_id) is produced, being widget_type
+    'search' or 'visualization'.
+
+    :param dashboard: dashboard to analyze (in fact, its value field)
+    :returns: list of widgets
     """
 
-    logger.debug("Reading panels JSON file: %s", import_file)
+    widgets = []
+    panels = json.loads(dashboard['panelsJSON'])
+    for widget in panels:
+        widgets.append((widget['type'], widget['id']))
+    return widgets
+
+class Panel_File_Not_Found(Exception):
+    """Exception raised when a file with a panel representation is not found"""
+    pass
+
+class Panel_File_Wrong_Format(Exception):
+    """Exception raised when a file with a panel representation is wrongly formatted"""
+    pass
+
+class Index_Not_Found(Exception):
+    """Exception raised if no index pattern is found for an element"""
+    pass
+
+class Panel():
+    """Class to manage in-memory representations of Kibana dashboards.
+
+    In this context, a panel is the representation of a Kibana dashboard,
+    its visualizations, searches, and index patterns.
+    """
+
+    def __init__(self):
+
+        # In memory representation of my panel
+        self.panel = None
+
+    def _build_elements(self):
+        """Build elements data structure.
+
+        elements will be a dictionary, with one entry per kind
+        of element (dashboard, visualization, search, index pattern).
+        Each entry will be itself another dictionary, keyed by id,
+        with values corresponding to the element in selef.panels
+        (which is a dictionary itself).
+        Warning: value dictionaries will be those in self.panel, not
+        copies of them.
+
+        :returns: dictionary with the elements dictionary
+        """
+
+        elements = {'dashboards': {}, 'index_patterns': {},
+                         'searches': {}, 'visualizations': {}}
+        for kind in self.panel:
+            if kind == 'dashboard':
+                elements['dashboards'][self.panel[kind]['id']] = {
+                    'value': self.panel[kind]
+                    }
+            else:
+                for element in self.panel[kind]:
+                    elements[kind][element['id']] = {
+                        'value': element
+                        }
+        return elements
+
+    @staticmethod
+    def _add_index_elements(elements):
+        """Annotates an elements data structure annotated with index information.
+
+        For each element, the list of indexes that it needs is included
+        as a new field.
+
+        :param elements: dictionary with the elements to be annotated
+        """
+
+        for index_id in elements['index_patterns']:
+            # Index patterns depend on themselves
+            elements['index_patterns'][index_id]['index'] = index_id
+        for search_id in elements['searches']:
+            search = elements['searches']['search_id']['value']
+            if 'kibanaSavedObjectMeta' in search:
+                index_id = get_index_pattern_from_meta(search['kibanaSavedObjectMeta'])
+                elements['searches'][search_id]['index'] = index_id
+            else:
+                raise Index_Not_Found("Index pattern not found for search " \
+                                      + search_id)
+        for vis_id in elements['visualizations']:
+            vis = elements['visualizations'][vis_id]['value']
+            if 'savedSearchId' in vis:
+                search_id = vis['savedSearchId']
+                index_id = elements['searches'][search_id]['index']
+            elif 'kibanaSavedObjectMeta' in vis:
+                index_id = get_index_pattern_from_meta(vis['kibanaSavedObjectMeta'])
+            else:
+                raise Index_Not_Found("Index pattern not found for visualization " \
+                                      + vis_id)
+            elements['visualizations'][vis_id]['index'] = index_id
+        for dash_id in elements['dashboards']:
+            index_ids = []
+            dash = elements['dashboards'][search_id]['value']
+            widgets = get_widgets_from_dashboard(dash)
+            for widget in widgets:
+                index_id = elements[widget[0]][widget[1]['index']]
+                if index_id not in index_ids:
+                    index_ids.append(index_id)
+            elements['dashboards'][dash_id]['indexes'] = index_ids
+
+    def _filter_elements(self, indexes):
+        """Produce an elements data structure by filtering self.elements.
+
+        The new data structure will have only those elements
+        which are based on the given indexes.
+
+        Warning: value dictionaries will be those in self.panel, not
+        copies of them.
+
+        :param indexes: indexes to use as filter
+        :returns: dictionary with the elements dictionary
+        """
+
+        elements = {'dashboards': {}, 'index_patterns': {},
+                         'searches': {}, 'visualizations': {}}
+#        for kind in self.panel:
+
+    def read_from_file(self, file):
+        """Read a panel representation from a file (in JSON format).
+
+        Reads a file with the representation of a Kibana panel
+        from a file (in JSON format) into a dictionary in this object.
+        The file should includes a JSON dictionary with a dashboard,
+        its visualizations, searches, and index patterns.
+        All that stuff will be read into self.panel.
+        The file will first be found in the current directory,
+        and if not found, it will be found in the panels module.
+        In the second case, if the file name is prefixed with panels/json,
+        that prefix will be removed before finding the file.
+
+        Sets self.source with the name of the dashboard in the panel,
+        and self.from with 'dir' or 'module', depending on where the
+        file was found.
+
+        :param file: name of JSON file with the dashboard to read
+        """
+
+        if os.path.isfile(file):
+            logger.debug("Reading panel from directory: %s", file)
+            with open(file, 'r') as f:
+                panel_str = f.read()
+            self.source = 'dir'
+        else:
+            try:
+                import panels
+                logger.debug("Reading panel from module panels")
+                # Next is just a hack for files with "expected" prefix
+                if file.startswith('panels/json/'):
+                    module_file = file[len('panels/json/'):]
+                else:
+                    module_file = file
+                panel_bytes = pkgutil.get_data('panels', 'json' + '/' + module_file)
+                panel_str = panel_bytes.decode(encoding='utf8')
+            except (ImportError, FileNotFoundError, AttributeError):
+                logger.error(
+                    "Panel not found (not in directory not in panels module): %s",
+                    file
+                    )
+                raise Panel_File_Not_Found("File declaring a panel not found: " + file)
+            self.source = 'module'
+
+        try:
+            self.panel = json.loads(panel_str)
+        except ValueError:
+            logger.error("Wrong file format (not JSON): %s", file)
+            raise Panel_File_Wrong_Format("Wrong format for a panel file: " + file)
+
+        if ('dashboard' not in self.panel) or ('id' not in self.panel['dashboard']):
+            logger.error("Import: File with wrong format (can't find dashboard field): %s",
+                         file)
+            raise Panel_File_Wrong_Format("Missing dashboard id in panel file: " + file)
+        else:
+            self.name = self.panel['dashboard']['id']
+
+        self.elements = self._build_elements()
+
+
+def import_dashboard(elastic_url, import_file, es_index=".kibana",
+                     data_sources=None, indexes=None):
+    """ Import a dashboard from a file (upload it from file to Elasticsearch)
+
+    The file to import includes all the components of the dashboard in JSON format.
+    All of them will be uploaded to the Kibana index, provided they
+    are included in the data sources (if specified), and in the indexed
+    (if specified).
+
+    Will exit if dashboard not found in the
+    :param elastic_url: url of Elasticsearch instance
+    :param import_file: file with the dashboard to upload
+    :para, es_index: Kibana index in ElasticSearch (default: .kibana)
+    :param data_sources: if not None, only upload item for these data_sources
+    :param      indexes: if not None, only upload item for these indexes
+    """
+
+    logger.debug("Import: Reading panels from JSON file: %s", import_file)
     dashboard = read_panel_file(import_file)
 
-    if (dashboard is None) or ('dashboard' not in dashboard):
-        logger.error("Wrong file format (can't find 'dashboard' field): %s",
+    if (dashboard is None) or ('dashboard' not in dashboard) or \
+        ('id' not in dashboard['dashboard']):
+        logger.error("Import: File with wrong format (can't find dashboard field): %s",
                      import_file)
         sys.exit(1)
+    else:
+        dashboard_name = dashboard['dashboard']['id']
+    feed_dashboard(dashboard, elastic_url, es_index, data_sources, indexes)
 
-    feed_dashboard(dashboard, elastic_url, es_index, data_sources)
+    logger.info("Import: Dashboard %s imported from file %s",
+                dashboard_name, import_file)
 
-    logger.info("Dashboard %s imported", get_dashboard_name(import_file))
 
+def feed_dashboard(dashboard, elastic_url, es_index=".kibana",
+                   data_sources=None, indexes=None):
+    """ Import a dashboard (upload it to Elasticsearch).
+    If data_sources or indexes are defined, just include items
+    for these data data_sources or indexes.
 
-def feed_dashboard(dashboard, elastic_url, es_index=None, data_sources=None):
-    """ Import a dashboard. If data_sources are defined, just include items
-        for this data source.
+    :param    dashboard: dashboard dictionary
+    :param  elastic_url: url of Elasticsearch instance
+    :param     es_index: Elasticsearch Kibana index (Default: .kibana)
+    :param data_sources: if not None, only upload items for these data_sources
+    :param      indexes: if not None, only upload items for these indexes
     """
-
-    if not es_index:
-        es_index = ".kibana"
 
     elastic = ElasticSearch(elastic_url, es_index)
 
     import_item_json(elastic, "dashboard", dashboard['dashboard']['id'],
-                     dashboard['dashboard']['value'], data_sources)
+                     dashboard['dashboard']['value'], data_sources, indexes)
 
     if 'searches' in dashboard:
         for search in dashboard['searches']:
-            import_item_json(elastic, "search", search['id'], search['value'], data_sources)
+            import_item_json(elastic, "search", search['id'], search['value'],
+                             data_sources, indexes)
 
     if 'index_patterns' in dashboard:
         for index in dashboard['index_patterns']:
             if not data_sources or is_index_pattern_from_data_sources(index, data_sources):
-                import_item_json(elastic, "index-pattern", index['id'], index['value'])
+                import_item_json(elastic, "index-pattern", index['id'],
+                                 index['value'], data_sources, indexes)
             else:
-                logger.debug("Index pattern %s not for %s. Not included.", search['id'], data_sources)
+                logger.debug("Index pattern %s not for %s. Not included.", search['id'], data_sources, indexes)
 
     if 'visualizations' in dashboard:
         for vis in dashboard['visualizations']:
             if not data_sources or is_vis_from_data_sources(vis, data_sources):
-                import_item_json(elastic, "visualization", vis['id'], vis['value'])
+                import_item_json(elastic, "visualization", vis['id'],
+                                 vis['value'], data_sources, indexes)
             else:
                 logger.debug("Vis %s not for %s. Not included.", vis['id'], data_sources)
 
@@ -644,11 +893,12 @@ def fetch_dashboard(elastic_url, dash_id, es_index=None):
             vis_id = panel['id']
             vis_json = get_vis_json(elastic, vis_id)
             kibana["visualizations"].append({"id": vis_id, "value": vis_json})
-            search_id = get_search_from_vis(elastic, vis_id)
+            search_id = get_search_from_vis_json(vis_json)
             if search_id and search_id not in search_ids_done:
+                search_json = get_search_json(elastic, search_id)
                 search_ids_done.append(search_id)
                 kibana["searches"].append({"id": search_id,
-                                           "value": get_search_json(elastic, search_id)})
+                                           "value": search_json})
             index_pattern_id = get_index_pattern_from_vis(elastic, vis_id)
             if index_pattern_id and index_pattern_id not in index_ids_done:
                 index_ids_done.append(index_pattern_id)
